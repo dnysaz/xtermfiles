@@ -17,7 +17,6 @@ from pathlib import Path
 #  Settings
 # ─────────────────────────────────────────────────────────────────────────────
 SETTINGS_PATH = Path.home() / ".config" / "xtermfiles" / "settings.json"
-
 DEFAULTS: dict = {
     "show_hidden":        False,
     "preview_max_kb":     200,
@@ -27,6 +26,7 @@ DEFAULTS: dict = {
     "confirm_overwrite":  True,
     "show_file_icons":    True,
     "saved_ssh":          [],
+    "view_mode":          "list",
 }
 
 
