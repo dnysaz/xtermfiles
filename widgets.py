@@ -1,5 +1,5 @@
 """
-widgets.py — Custom widgets: FileRow, FileListView, DetailStrip, FloatingWindow
+widgets.py — FileRow, FileListView, DetailStrip, FloatingWindow
 xtermfiles — Terminal File Explorer
 """
 
@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Optional
 
 from textual.app import ComposeResult
-from textual.widget import Widget
 from textual.widgets import ListView, ListItem, Label, Static, Button, Input, TextArea
 from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.message import Message
@@ -22,9 +21,15 @@ from helpers import (
     get_icon, get_mime, get_lang, is_text_file, list_dir, Settings,
 )
 
+TEXTUAL_LANGS = {
+    "python", "javascript", "typescript", "html", "css", "markdown",
+    "json", "sql", "bash", "rust", "go", "java", "c", "cpp", "regex",
+    "yaml", "toml", "scss", "kotlin", "ruby", "php", "lua", "r",
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Internal message: user double-clicked a file or folder
+#  Message: double-clicked a file (not a dir) in the main list
 # ─────────────────────────────────────────────────────────────────────────────
 class FileDoubleClicked(Message):
     def __init__(self, path: Path):
@@ -33,11 +38,9 @@ class FileDoubleClicked(Message):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  FileRow — one row in the file list
+#  FileRow — one row (composed once, no re-renders on hover)
 # ─────────────────────────────────────────────────────────────────────────────
 class FileRow(ListItem):
-    """One file/folder row with icon, name, size, type, date columns."""
-
     class DoubleClicked(Message):
         def __init__(self, path: Path):
             super().__init__()
@@ -53,7 +56,7 @@ class FileRow(ListItem):
         show_icons = self._settings.get("show_file_icons")
         date_fmt   = self._settings.get("date_format")
         try:
-            st = self.path.stat()
+            st       = self.path.stat()
             size_str = format_size(st.st_size) if self.path.is_file() else ""
             date_str = format_date(st.st_mtime, date_fmt)
         except OSError:
@@ -75,15 +78,9 @@ class FileRow(ListItem):
             name_text.append("[", style="#555555")
             name_text.append(icon, style="#6a9955")
             name_text.append("] ", style="#555555")
-            if self.path.name.startswith("."):
-                name_text.append(name, style="#666666")
-            else:
-                name_text.append(name, style="#d4d4d4")
+            name_text.append(name, style="#666666" if name.startswith(".") else "#d4d4d4")
         else:
-            if self.path.name.startswith("."):
-                name_text.append(name, style="#666666")
-            else:
-                name_text.append(name, style="#d4d4d4")
+            name_text.append(name, style="#666666" if name.startswith(".") else "#d4d4d4")
 
         yield Label(name_text, classes="row-name")
         yield Label(size_str,  classes="row-size")
@@ -96,15 +93,12 @@ class FileRow(ListItem):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  FileListView — right-panel file list
+#  FileListView
+#  Single click folder  → enter it (DirectoryEntered)
+#  Single click file    → select / preview (FileSelected)
+#  Double click any     → open floating window (FileDoubleClicked)
 # ─────────────────────────────────────────────────────────────────────────────
 class FileListView(ListView):
-    """
-    Single click on folder = enter it.
-    Single click on file = select it.
-    Double click = open floating window.
-    """
-
     class FileSelected(Message):
         def __init__(self, path: Path):
             super().__init__()
@@ -121,12 +115,33 @@ class FileListView(ListView):
         self._current_dir: Optional[Path] = None
         self._entries: list[Path] = []
 
+    # ── Public API ────────────────────────────────────────────────────────
     def load_directory(self, path: Path, show_hidden: bool = False):
         self._current_dir = path
-        self._entries = list_dir(path, show_hidden)
         self.clear()
-        for p in self._entries:
-            self.append(FileRow(p, self._settings))
+        self._entries = []
+        self.append(ListItem(Label("  ⌛ Loading...")))
+        self.run_worker(self._async_load(path, show_hidden), thread=True)
+
+    async def _async_load(self, path: Path, show_hidden: bool = False):
+        try:
+            entries = list_dir(path, show_hidden)
+            self.app.call_from_thread(self._finish_load, entries)
+        except Exception as e:
+            msg = str(e)
+            if "socket" in msg.lower() or "closed" in msg.lower():
+                msg = "Connection lost. Try reconnecting."
+            self.app.call_from_thread(self.app.notify, f"Load Error: {msg}", severity="error")
+            self.app.call_from_thread(self.clear)
+
+    def _finish_load(self, entries: list[Path]):
+        self._entries = entries
+        self.clear()
+        if not entries:
+            self.append(ListItem(Label("  (empty)")))
+        else:
+            for p in entries:
+                self.append(FileRow(p, self._settings))
 
     def refresh_directory(self, show_hidden: bool = False):
         if self._current_dir:
@@ -138,32 +153,29 @@ class FileListView(ListView):
             return self._entries[self.index]
         return None
 
-    @property
-    def current_dir(self) -> Optional[Path]:
-        return self._current_dir
-
     def try_select_path(self, path: Path):
         try:
-            idx = self._entries.index(path)
-            self.index = idx
+            self.index = self._entries.index(path)
         except (ValueError, AttributeError):
             pass
 
+    # ── Events ────────────────────────────────────────────────────────────
     def on_list_view_selected(self, event: ListView.Selected):
         event.stop()
         path = self.selected_path
-        if path:
-            if path.is_dir():
-                self.post_message(self.DirectoryEntered(path))
-            else:
-                self.post_message(self.FileSelected(path))
+        if not path:
+            return
+        if path.is_dir():
+            self.post_message(self.DirectoryEntered(path))
+        else:
+            self.post_message(self.FileSelected(path))
 
     def on_file_row_double_clicked(self, event: FileRow.DoubleClicked):
         event.stop()
         self.post_message(FileDoubleClicked(event.path))
 
     def on_key(self, event: events.Key):
-        if event.key == "backspace" or event.key == "left":
+        if event.key in ("backspace", "left"):
             if self._current_dir and self._current_dir.parent != self._current_dir:
                 self.post_message(self.DirectoryEntered(self._current_dir.parent))
                 event.stop()
@@ -175,7 +187,7 @@ class FileListView(ListView):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  DetailStrip — bottom info bar
+#  DetailStrip — single-line info bar at the bottom
 # ─────────────────────────────────────────────────────────────────────────────
 class DetailStrip(Static):
     def __init__(self, settings: Settings, **kwargs):
@@ -186,54 +198,50 @@ class DetailStrip(Static):
         if path is None:
             self.update(""); return
         try:
-            st = path.stat()
+            st       = path.stat()
             date_fmt = self._settings.get("date_format")
-            show_icons = self._settings.get("show_file_icons")
-            icon = get_icon(path, show_icons)
-            text = Text()
+            show_ic  = self._settings.get("show_file_icons")
+            icon     = get_icon(path, show_ic)
+            text     = Text()
             text.append(f" {icon} " if icon else " ")
-            text.append(path.name,
-                "bold #4fc1ff" if path.is_dir() else "bold #d4d4d4")
-            text.append(f"   {file_type_label(path)}", "#888888")
+            text.append(path.name, "bold #4fc1ff" if path.is_dir() else "bold #d4d4d4")
+            text.append(f"  {file_type_label(path)}", "#888888")
             if path.is_file():
-                text.append(f"   Size: {format_size(st.st_size)}", "#9cdcfe")
-            text.append(f"   Modified: {format_date(st.st_mtime, date_fmt)}", "#6a9955")
-            text.append(f"   {format_perms(st.st_mode)}", "#ce9178")
-            text.append(f"   {get_owner(st)}", "#c586c0")
-            if path.is_file():
-                text.append(f"   {get_mime(path)}", "#888888")
+                text.append(f"  {format_size(st.st_size)}", "#9cdcfe")
+            text.append(f"  {format_date(st.st_mtime, date_fmt)}", "#6a9955")
+            text.append(f"  {format_perms(st.st_mode)}", "#ce9178")
+            text.append(f"  {get_owner(st)}", "#c586c0")
             self.update(text)
         except Exception as e:
             self.update(f"[red]{e}[/red]")
 
     def show_dir_summary(self, path: Path, show_hidden: bool = False):
         entries = list_dir(path, show_hidden)
-        n_dirs  = sum(1 for e in entries if e.is_dir())
-        n_files = sum(1 for e in entries if e.is_file())
-        text = Text()
-        text.append(f" 📁 {path.name}   ", "bold #4fc1ff")
-        text.append(f"{n_dirs} folder{'s' if n_dirs != 1 else ''}, "
-                    f"{n_files} file{'s' if n_files != 1 else ''}", "#888888")
-        self.update(text)
+        n_d = sum(1 for e in entries if e.is_dir())
+        n_f = sum(1 for e in entries if e.is_file())
+        t = Text()
+        t.append(f" 📁 {path.name}  ", "bold #4fc1ff")
+        t.append(f"{n_d} folder{'s' if n_d != 1 else ''}, {n_f} file{'s' if n_f != 1 else ''}", "#888888")
+        self.update(t)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  FloatingWindow — draggable, resizable, editable floating window
+#  FloatingWindow — draggable, resizable, with per-window command bar
+#  Fixes vs original:
+#  - fw-cmd-input starts hidden; display toggled correctly
+#  - Ctrl+S save works without needing `:s` command
+#  - space event.stop() prevents leaking to main app double-space handler
+#  - resize handle corner detection fixed (uses widget-local coords)
 # ─────────────────────────────────────────────────────────────────────────────
-TEXTUAL_LANGS = {
-    "python", "javascript", "typescript", "html", "css", "markdown",
-    "json", "sql", "bash", "rust", "go", "java", "c", "cpp", "regex",
-}
+class FloatingWindow(ListView.__class__.__bases__[0].__subclasshook__.__class__
+                     if False else __import__('textual.widget', fromlist=['Widget']).Widget):
+    # Import Widget properly
+    pass
 
+# Re-define properly (the above was a joke placeholder)
+from textual.widget import Widget
 
 class FloatingWindow(Widget):
-    """
-    Draggable, resizable floating window.
-    - Folders: shows directory listing, click item → new window
-    - Files: shows content in read mode, :e to edit, :s to save, :q to close
-    - Double-space or Escape → command bar
-    """
-
     _next_id = 0
 
     class OpenPath(Message):
@@ -245,290 +253,264 @@ class FloatingWindow(Widget):
         FloatingWindow._next_id += 1
         self._wid = FloatingWindow._next_id
         super().__init__(id=f"fw-{self._wid}")
-        self._path = path
+        self._path     = path
         self._settings = settings
         self._entries: list[Path] = []
-        # Drag state
-        self._dragging = False
-        self._drag_start_screen = (0, 0)
-        self._drag_start_pos = (0, 0)
-        # Resize state
-        self._resizing = False
-        self._resize_start_screen = (0, 0)
-        self._resize_start_size = (64, 22)
-        self._cur_width = 64
-        self._cur_height = 22
-        # Position (staggered)
-        self._pos_x = 4 + (self._wid % 6) * 3
-        self._pos_y = 2 + (self._wid % 6) * 2
-        # Edit state
+
+        # Drag / resize state
+        self._dragging  = False
+        self._resizing  = False
+        self._drag_sx   = self._drag_sy   = 0
+        self._drag_ox   = self._drag_oy   = 0
+        self._res_sx    = self._res_sy    = 0
+        self._res_ow    = self._res_oh    = 0
+        self._cur_w     = 64
+        self._cur_h     = 22
+
+        # Stagger position
+        offset = (self._wid - 1) % 8
+        self._px = 4 + offset * 3
+        self._py = 2 + offset * 2
+
+        # Editor state
+        self._is_text    = path.is_file() and is_text_file(path)
         self._is_editing = False
-        self._is_text = path.is_file() and is_text_file(path)
-        # Command bar state
-        self._last_space_time: float = 0.0
-        self._cmd_visible = False
+        self._cmd_vis    = False
+        self._last_space = 0.0
 
     def compose(self) -> ComposeResult:
-        icon = "📁" if self._path.is_dir() else "📄"
-        mode_text = "  READ" if self._is_text else ""
+        icon = "📁" if self._path.is_dir() else "F"
         with Vertical():
-            # Title bar
-            with Horizontal(classes="fw-titlebar"):
-                yield Static(
-                    f" {icon} {self._path.name}",
-                    classes="fw-title-label",
-                    id=f"fw-title-{self._wid}",
-                )
+            # Title bar (drag zone)
+            with Horizontal(classes="fw-titlebar", id=f"fw-tb-{self._wid}"):
+                yield Static(f" {icon} {self._path.name}", classes="fw-title-label",
+                             id=f"fw-tl-{self._wid}")
                 if self._is_text:
-                    yield Static(mode_text, classes="fw-mode-label",
-                                 id=f"fw-mode-{self._wid}")
-                yield Button("✕", classes="fw-close-btn")
+                    yield Static(" READ", classes="fw-mode-label",
+                                 id=f"fw-ml-{self._wid}")
+                yield Button("x", classes="fw-close-btn")
 
-            # Content area
+            # Content
             if self._path.is_dir():
                 self._entries = list_dir(
                     self._path, self._settings.get("show_hidden")
                 )
-                show_icons = self._settings.get("show_file_icons")
-                items: list[ListItem] = []
+                show_ic = self._settings.get("show_file_icons")
+                items = []
                 for entry in self._entries:
-                    eicon = get_icon(entry, show_icons)
-                    name_text = Text()
+                    ic = get_icon(entry, show_ic)
+                    t  = Text()
                     if entry.is_dir():
-                        name_text.append(f"{eicon} ", "#4fc1ff")
-                        name_text.append(entry.name, "bold #4fc1ff")
-                    elif eicon.strip():
-                        name_text.append(f"[{eicon}] ", "#6a9955")
-                        name_text.append(entry.name, "#d4d4d4")
+                        t.append(f"{ic} ", "#4fc1ff")
+                        t.append(entry.name, "bold #4fc1ff")
+                    elif ic.strip():
+                        t.append(f"[{ic}] ", "#6a9955")
+                        t.append(entry.name, "#d4d4d4")
                     else:
-                        name_text.append(entry.name, "#d4d4d4")
-                    items.append(ListItem(Label(name_text)))
+                        t.append(entry.name, "#d4d4d4")
+                    items.append(ListItem(Label(t)))
                 yield ListView(*items, classes="fw-list")
+
             elif self._is_text:
-                # Text file: use TextArea (read-only initially)
                 try:
                     content = self._path.read_text(errors="replace")
                 except Exception:
                     content = ""
                 lang = get_lang(self._path)
                 use_lang = lang if lang in TEXTUAL_LANGS else None
-                yield TextArea(
-                    content, language=use_lang, read_only=True,
-                    id=f"fw-ta-{self._wid}", classes="fw-editor",
-                )
-            else:
-                # Binary / non-text file: static preview
-                with ScrollableContainer(classes="fw-content"):
-                    yield Static(self._build_file_preview(), classes="fw-preview")
+                yield TextArea(content, language=use_lang, theme="vscode_dark",
+                               read_only=True, id=f"fw-ta-{self._wid}",
+                               classes="fw-editor")
 
-            # Command input (hidden by default, toggled with double-space/Esc)
+            else:
+                with ScrollableContainer(classes="fw-content"):
+                    yield Static(self._file_info(), classes="fw-preview")
+
+            # Command bar (hidden by default)
             yield Input(
                 placeholder=":e edit  :s save  :q close",
                 id=f"fw-cmd-{self._wid}",
                 classes="fw-cmd-input",
             )
-            # Resize handle
             yield Static("◢", classes="fw-resize-handle")
 
-    def _build_file_preview(self):
-        path = self._path
+    def _file_info(self) -> str:
         try:
-            st = path.stat()
+            st = self._path.stat()
             return (
-                f"[bold yellow]📄 {path.name}[/bold yellow]\n\n"
-                f"Type    : {file_type_label(path)}\n"
+                f"[bold]{self._path.name}[/bold]\n\n"
+                f"Type    : {file_type_label(self._path)}\n"
                 f"Size    : {format_size(st.st_size)}\n"
-                f"MIME    : {get_mime(path)}\n"
+                f"MIME    : {get_mime(self._path)}\n"
                 f"Modified: {format_date(st.st_mtime)}\n"
             )
         except Exception as e:
-            return f"[red]Cannot read file info: {e}[/red]"
+            return f"[red]{e}[/red]"
 
     def on_mount(self):
-        self.styles.offset = (self._pos_x, self._pos_y)
+        self.styles.offset = (self._px, self._py)
+        self.styles.width  = self._cur_w
+        self.styles.height = self._cur_h
+        # Ensure cmd bar starts hidden
+        try:
+            self.query_one(f"#fw-cmd-{self._wid}", Input).display = False
+        except Exception:
+            pass
 
     # ── Command bar ───────────────────────────────────────────────────────
-    def _show_cmd_input(self):
+    def _show_cmd(self):
         try:
-            cmd = self.query_one(f"#fw-cmd-{self._wid}", Input)
-            cmd.display = True
-            cmd.value = ""
-            cmd.focus()
-            self._cmd_visible = True
+            inp = self.query_one(f"#fw-cmd-{self._wid}", Input)
+            inp.display = True
+            inp.value   = ""
+            inp.focus()
+            self._cmd_vis = True
         except Exception:
             pass
 
-    def _hide_cmd_input(self):
+    def _hide_cmd(self):
         try:
-            cmd = self.query_one(f"#fw-cmd-{self._wid}", Input)
-            cmd.display = False
-            self._cmd_visible = False
-            # Refocus the text area or list
-            if self._is_text:
-                self.query_one(f"#fw-ta-{self._wid}", TextArea).focus()
-            else:
-                try:
-                    self.query_one(".fw-list", ListView).focus()
-                except Exception:
-                    pass
+            inp = self.query_one(f"#fw-cmd-{self._wid}", Input)
+            inp.display   = False
+            self._cmd_vis = False
         except Exception:
             pass
+        # Refocus content
+        try:
+            self.query_one(f"#fw-ta-{self._wid}", TextArea).focus()
+        except Exception:
+            try:
+                self.query_one(".fw-list", ListView).focus()
+            except Exception:
+                pass
 
-    def _handle_fw_command(self, raw: str):
+    def _run_cmd(self, raw: str):
         cmd = raw.strip().lstrip(":").lower()
         if cmd in ("e", "edit"):
-            self._enter_edit_mode()
+            self._enter_edit()
         elif cmd in ("s", "save"):
-            self._save_file()
-        elif cmd in ("q", "quit"):
+            self._save()
+        elif cmd in ("q", "quit", "close"):
             self.remove()
         else:
-            self.app.notify(f"Unknown window command: {raw}", severity="warning")
+            self.app.notify(f"Unknown: {raw}", severity="warning")
 
-    def _enter_edit_mode(self):
+    def _enter_edit(self):
         if not self._is_text:
-            self.app.notify("Cannot edit non-text files", severity="warning")
-            return
+            self.app.notify("Cannot edit binary files", severity="warning"); return
         try:
             ta = self.query_one(f"#fw-ta-{self._wid}", TextArea)
-            ta.read_only = False
+            ta.read_only     = False
             self._is_editing = True
-            self._update_mode_label("  EDIT")
+            self._set_mode(" EDIT")
             ta.focus()
         except Exception:
             pass
 
-    def _save_file(self):
-        if not self._is_text or not self._is_editing:
-            self.app.notify("Not in edit mode", severity="warning")
-            return
+    def _save(self):
+        if not self._is_editing:
+            self.app.notify("Not in edit mode — press :e first", severity="warning"); return
         try:
             ta = self.query_one(f"#fw-ta-{self._wid}", TextArea)
             self._path.write_text(ta.text)
             self.app.notify(f"Saved: {self._path.name}")
-            # Stay in edit mode after saving
         except Exception as e:
             self.app.notify(f"Save failed: {e}", severity="error")
 
-    def _update_mode_label(self, text: str):
+    def _set_mode(self, text: str):
         try:
-            label = self.query_one(f"#fw-mode-{self._wid}", Static)
-            label.update(text)
+            self.query_one(f"#fw-ml-{self._wid}", Static).update(text)
         except Exception:
             pass
 
-    # ── Key handling ──────────────────────────────────────────────────────
+    # ── Keys ──────────────────────────────────────────────────────────────
     def on_key(self, event: events.Key):
-        # Ctrl+S = save directly
+        # Ctrl+S = save anywhere in the window
         if event.key == "ctrl+s" and self._is_editing:
-            self._save_file()
-            event.stop()
-            return
+            self._save(); event.stop(); return
 
-        # Escape = toggle command bar
+        # Escape = toggle cmd bar
         if event.key == "escape":
-            if self._cmd_visible:
-                self._hide_cmd_input()
+            if self._cmd_vis:
+                self._hide_cmd()
             else:
-                self._show_cmd_input()
-            event.stop()
-            return
+                self._show_cmd()
+            event.stop(); return
 
-        # Double-space = toggle command bar (only if not editing / not in Input)
+        # Double-space = show cmd bar (only when NOT editing text / NOT in Input)
         if event.key == "space":
             focused = self.app.focused
-            # Let space pass if typing in the command input
+            # Let space through if in the cmd Input itself or in edit-mode TextArea
             try:
-                cmd = self.query_one(f"#fw-cmd-{self._wid}", Input)
-                if focused == cmd:
+                if focused == self.query_one(f"#fw-cmd-{self._wid}", Input):
                     return
             except Exception:
                 pass
-            # Let space pass if TextArea is in edit mode
             if self._is_editing:
                 try:
-                    ta = self.query_one(f"#fw-ta-{self._wid}", TextArea)
-                    if focused == ta:
+                    if focused == self.query_one(f"#fw-ta-{self._wid}", TextArea):
                         return
                 except Exception:
                     pass
-
             now = time.monotonic()
-            if now - self._last_space_time < 0.45:
-                self._show_cmd_input()
-                event.stop()
-                self._last_space_time = 0.0
-                return
-            self._last_space_time = now
-            event.stop()  # Prevent reaching main app's double-space
-            return
+            if now - self._last_space < 0.45:
+                self._show_cmd()
+                self._last_space = 0.0
+            else:
+                self._last_space = now
+            event.stop()   # prevent leaking to main app
 
-    # ── Input submitted (command bar) ─────────────────────────────────────
     def on_input_submitted(self, event: Input.Submitted):
         if event.input.id == f"fw-cmd-{self._wid}":
             event.stop()
             val = event.value.strip()
-            self._hide_cmd_input()
+            self._hide_cmd()
             if val:
-                self._handle_fw_command(val)
+                self._run_cmd(val)
 
-    # ── Dragging & Resizing ───────────────────────────────────────────────
+    # ── Drag & Resize ─────────────────────────────────────────────────────
     def on_mouse_down(self, event: events.MouseDown):
         if event.button != 1:
             return
-        h = self.size.height
-        w = self.size.width
-        # Bottom-right corner = resize
+        h = self._cur_h
+        w = self._cur_w
+        # Bottom-right 3 cols × 1 row = resize handle
         if event.y >= h - 1 and event.x >= w - 3:
             self._resizing = True
-            self._resize_start_screen = (event.screen_x, event.screen_y)
-            self._resize_start_size = (self._cur_width, self._cur_height)
-            self.capture_mouse()
-            event.stop()
-        # Title bar = drag
+            self._res_sx, self._res_sy = event.screen_x, event.screen_y
+            self._res_ow, self._res_oh = self._cur_w, self._cur_h
+            self.capture_mouse(); event.stop()
+        # Title bar row = drag
         elif event.y == 0:
             self._dragging = True
-            self._drag_start_screen = (event.screen_x, event.screen_y)
-            self._drag_start_pos = (self._pos_x, self._pos_y)
-            self.capture_mouse()
-            event.stop()
+            self._drag_sx, self._drag_sy = event.screen_x, event.screen_y
+            self._drag_ox, self._drag_oy = self._px, self._py
+            self.capture_mouse(); event.stop()
 
     def on_mouse_move(self, event: events.MouseMove):
         if self._dragging:
-            dx = event.screen_x - self._drag_start_screen[0]
-            dy = event.screen_y - self._drag_start_screen[1]
-            self._pos_x = self._drag_start_pos[0] + dx
-            self._pos_y = self._drag_start_pos[1] + dy
-            self.styles.offset = (self._pos_x, self._pos_y)
+            self._px = self._drag_ox + (event.screen_x - self._drag_sx)
+            self._py = self._drag_oy + (event.screen_y - self._drag_sy)
+            self.styles.offset = (self._px, self._py)
             event.stop()
         elif self._resizing:
-            dx = event.screen_x - self._resize_start_screen[0]
-            dy = event.screen_y - self._resize_start_screen[1]
-            new_w = max(30, self._resize_start_size[0] + dx)
-            new_h = max(8, self._resize_start_size[1] + dy)
-            self._cur_width = new_w
-            self._cur_height = new_h
-            self.styles.width = new_w
-            self.styles.height = new_h
+            self._cur_w = max(30, self._res_ow + (event.screen_x - self._res_sx))
+            self._cur_h = max(8,  self._res_oh + (event.screen_y - self._res_sy))
+            self.styles.width  = self._cur_w
+            self.styles.height = self._cur_h
             event.stop()
 
     def on_mouse_up(self, event: events.MouseUp):
-        if self._dragging:
-            self._dragging = False
-            self.release_mouse()
-            event.stop()
-        elif self._resizing:
-            self._resizing = False
-            self.release_mouse()
-            event.stop()
+        if self._dragging or self._resizing:
+            self._dragging = self._resizing = False
+            self.release_mouse(); event.stop()
 
     # ── Close button ──────────────────────────────────────────────────────
     def on_button_pressed(self, event: Button.Pressed):
         if "fw-close-btn" in event.button.classes:
-            self.remove()
-            event.stop()
+            self.remove(); event.stop()
 
-    # ── Clicking items inside directory window → new window ───────────────
+    # ── Directory item click → new window ─────────────────────────────────
     def on_list_view_selected(self, event: ListView.Selected):
         event.stop()
         lv = event.list_view
