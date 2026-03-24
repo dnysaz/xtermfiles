@@ -1,5 +1,7 @@
 """
-cli.py — Ketut's File Explorer  (entry point)
+cli.py — xtermfiles  (entry point)
+
+Terminal File Explorer — Windows Explorer style file manager for the terminal.
 
 Run:
     python cli.py              # opens home directory
@@ -21,6 +23,10 @@ Keyboard:
     Ctrl+Shift+N New folder  Ctrl+C/X/V Copy/Cut/Paste
     Ctrl+F Search  Ctrl+E Edit  Ctrl+P Preview
     Ctrl+H Toggle hidden  Ctrl+O Shell  Esc Clear cb
+
+Mouse:
+    Single click   = Enter folder / select file
+    Double click   = Open floating window (draggable, multi-instance)
 """
 
 import os
@@ -29,13 +35,18 @@ import time
 import shutil
 import stat
 import subprocess
+import asyncio
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
+from upath import UPath
 from textual.app import App, ComposeResult
 from textual.widgets import (
-    Header, DirectoryTree, Static, Input, Label, Button
+    Header, DirectoryTree, Static, Input, Label, Button,
+    ListView, ListItem
 )
+from textual.widgets._tree import TreeNode
 from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.binding import Binding
 from textual.reactive import reactive
@@ -47,14 +58,14 @@ from helpers import (
     APP_CSS, Clipboard, Settings,
     format_size, format_date, format_perms,
     get_owner, get_group, file_type_label,
-    is_text_file, md5_file, list_dir,
+    is_text_file, md5_file, list_dir, get_lang, get_mime,
 )
 from modals import (
     InputModal, ConfirmModal, SearchModal,
-    TextEditorModal, FilePreviewModal, SettingsModal, HelpModal,
-    CommandModal,
+    TextEditorModal, FilePreviewModal, SettingsModal,
+    HelpModal, CommandModal, SSHLoginModal, LoadingModal,
 )
-from widgets import FileListView, DetailStrip, FileDoubleClicked
+from widgets import FileListView, DetailStrip, FileDoubleClicked, FloatingWindow
 
 
 EXTRA_CSS = """
@@ -66,31 +77,41 @@ EXTRA_CSS = """
 
 # ---------------------------------------------------------------------------
 #  FilteredDirectoryTree
-#  Overrides filter_paths() — the ONLY reliable way to hide dotfiles in
-#  Textual's DirectoryTree (setting .show_hidden after mount does not work).
 # ---------------------------------------------------------------------------
 class FilteredDirectoryTree(DirectoryTree):
     """DirectoryTree that hides dotfiles via filter_paths unless _show_hidden."""
+    from upath import UPath
+    PATH = UPath
 
     def __init__(self, path: str, show_hidden: bool = False, **kwargs):
         super().__init__(path, **kwargs)
         self._show_hidden = show_hidden
+
+    def set_show_hidden(self, value: bool):
+        self._show_hidden = value
+        self.reload()
+
+    def reset_node(self, node: TreeNode, label: str, data: Any) -> None:
+        """Override root label if it's a UPath root."""
+        super().reset_node(node, label, data)
+        from upath import UPath
+        if isinstance(node.data.path, UPath):
+            # If path.name is empty (root), show host
+            if not node.data.path.name:
+                host = getattr(node.data.path.fs, "host", "remote")
+                node.set_label(f"root ({host})")
 
     def filter_paths(self, paths):
         if self._show_hidden:
             return paths
         return [p for p in paths if not p.name.startswith(".")]
 
-    def set_show_hidden(self, value: bool):
-        self._show_hidden = value
-        self.reload()
-
 
 # ---------------------------------------------------------------------------
 #  FileExplorer — main app
 # ---------------------------------------------------------------------------
 class FileExplorer(App):
-    TITLE = "Ketut's File Explorer"
+    TITLE = "xtermfiles"
     CSS = APP_CSS + EXTRA_CSS
 
     BINDINGS = [
@@ -118,7 +139,6 @@ class FileExplorer(App):
         self._settings  = Settings()
         self._clipboard = Clipboard()
 
-        # Resolve start directory
         if start_path is None:
             sp = self._settings.get("start_path") or "~"
             start_path = Path(sp).expanduser()
@@ -126,9 +146,9 @@ class FileExplorer(App):
         self._cwd: Path = self._root
         self._selected: Optional[Path] = None
 
-        # Read show_hidden from saved settings (default False)
         self.show_hidden = bool(self._settings.get("show_hidden"))
-        self._last_space_time: float = 0.0   # for double-space detection
+        self._last_space_time: float = 0.0
+        self._last_tree_click_time: float = 0.0
 
     # ------------------------------------------------------------------
     #  Layout
@@ -141,17 +161,27 @@ class FileExplorer(App):
                         id="addressbar")
 
         with Horizontal(id="layout"):
-            # Left panel — uses FilteredDirectoryTree so dots are gone from
-            # the very first render, before on_mount fires.
             with Vertical(id="left-panel"):
-                yield Static("   FOLDERS", id="left-title")
+                yield Static("   LOCAL SERVER", id="local-title", classes="tree-title")
                 yield FilteredDirectoryTree(
                     str(self._root),
                     show_hidden=self.show_hidden,
-                    id="tree-view",
+                    id="local-tree",
+                    classes="tree-view",
+                )
+                
+                # --- SAVED SSH SERVERS ---
+                yield Static("   SAVED SSH SERVERS", id="saved-ssh-title", classes="tree-title")
+                yield ListView(id="saved-ssh-list", classes="ssh-list")
+                
+                yield Static("   REMOTE SERVER", id="remote-title", classes="tree-title hidden")
+                yield FilteredDirectoryTree(
+                    str(self._root),  # placeholder
+                    show_hidden=self.show_hidden,
+                    id="remote-tree",
+                    classes="tree-view hidden",
                 )
 
-            # Right panel
             with Vertical(id="right-panel"):
                 with Horizontal(id="col-header"):
                     yield Static("   Name",      classes="col-name")
@@ -160,28 +190,64 @@ class FileExplorer(App):
                     yield Static("Date Modified", classes="col-date")
 
                 yield FileListView(self._settings, id="file-list")
+                with ScrollableContainer(id="file-preview-panel"):
+                    yield Static("", id="file-preview-content")
                 yield DetailStrip(self._settings, id="detail-strip")
 
-        # Status bar only — clean, no shortcut clutter
         yield Static("", id="statusbar")
 
     def on_mount(self):
         self._load_dir(self._cwd)
+        self._update_saved_ssh_list()
         self.query_one("#file-list", FileListView).focus()
+
+    def _update_saved_ssh_list(self):
+        try:
+            lst = self.query_one("#saved-ssh-list", ListView)
+            lst.clear()
+            saved = self._settings.get("saved_ssh") or []
+            for s in saved:
+                # show simple host part for display
+                display = s.split("@")[-1] if "@" in s else s
+                item = ListItem(Label(f" 🌐 {display}"), classes="ssh-item")
+                item.conn_str = s # Store directly
+                lst.append(item)
+        except NoMatches:
+            pass
 
     # ------------------------------------------------------------------
     #  Directory loading
     # ------------------------------------------------------------------
+    def _show_file_list(self):
+        try:
+            self.query_one("#col-header").display = True
+            self.query_one("#file-list").display = True
+            self.query_one("#file-preview-panel").display = False
+        except NoMatches:
+            pass
+
+    def _show_file_preview(self):
+        try:
+            self.query_one("#col-header").display = False
+            self.query_one("#file-list").display = False
+            self.query_one("#file-preview-panel").display = True
+        except NoMatches:
+            pass
+
     def _load_dir(self, path: Path):
-        self._cwd = path.resolve()
-        fl = self.query_one("#file-list", FileListView)
-        fl.load_directory(self._cwd, self.show_hidden)
-        self._selected = None
-        self._update_addressbar()
-        self._refresh_status()
-        self.query_one("#detail-strip", DetailStrip).show_dir_summary(
-            self._cwd, self.show_hidden
-        )
+        try:
+            self._cwd = path.resolve() if hasattr(path, "resolve") and not str(path).startswith("ssh://") else path
+            fl = self.query_one("#file-list", FileListView)
+            fl.load_directory(self._cwd, self.show_hidden)
+            self._selected = None
+            self._show_file_list()
+            self._update_addressbar()
+            self._refresh_status()
+            self.query_one("#detail-strip", DetailStrip).show_dir_summary(
+                self._cwd, self.show_hidden
+            )
+        except Exception as e:
+            self.notify(f"Failed to load directory: {e}", severity="error")
 
     def _update_addressbar(self):
         try:
@@ -215,34 +281,180 @@ class FileExplorer(App):
         self, event: DirectoryTree.DirectorySelected
     ):
         event.stop()
-        self._load_dir(Path(event.path))
+        self._load_dir(event.path)
         self.query_one("#file-list", FileListView).focus()
+
+    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected):
+        event.stop()
+        now = time.monotonic()
+        path = event.path
+        
+        # Double click opens floating window
+        if self._selected == path and now - getattr(self, "_last_tree_click_time", 0) < 0.5:
+            self._open_floating_window(path)
+            self._last_tree_click_time = 0.0
+            return
+            
+        self._last_tree_click_time = now
+        self._selected = path
+        self._preview_file_right(path)
 
     # ------------------------------------------------------------------
     #  Events — right file list
     # ------------------------------------------------------------------
     def on_file_list_view_file_selected(self, event: FileListView.FileSelected):
+        event.stop()
         self._selected = event.path
-        self.query_one("#detail-strip", DetailStrip).show_path(event.path)
+        self._preview_file_right(event.path)
+
+    def _preview_file_right(self, path: Path):
+        self.query_one("#detail-strip", DetailStrip).show_path(path)
         self._refresh_status()
+        self._show_file_preview()
+        
+        content_widget = self.query_one("#file-preview-content", Static)
+        if is_text_file(path):
+            try:
+                size = path.stat().st_size
+                max_bytes = self._settings.get("preview_max_kb") * 1024
+                if size > max_bytes:
+                    content_widget.update(f"[yellow]File too large to preview ({format_size(size)}). Limit: {self._settings.get('preview_max_kb')} KB[/yellow]")
+                else:
+                    content = path.read_text(errors="replace")
+                    lang = get_lang(path)
+                    from rich.syntax import Syntax
+                    # Use a textual-compatible subset. Rich syntax highlights
+                    syntax_lang = lang if lang in ["python", "javascript", "typescript", "html", "css", "markdown", "json", "sql", "bash", "rust", "go", "java", "c", "cpp", "regex"] else "text"
+                    content_widget.update(Syntax(content, syntax_lang, theme="monokai", line_numbers=True, word_wrap=False))
+            except Exception as e:
+                content_widget.update(f"[red]Error reading file: {e}[/red]")
+        else:
+            try:
+                st = path.stat()
+                content_widget.update(
+                    f"[bold yellow]📄 {path.name}[/bold yellow]\n\n"
+                    f"Type    : {file_type_label(path)}\n"
+                    f"Size    : {format_size(st.st_size)}\n"
+                    f"MIME    : {get_mime(path)}\n"
+                    f"Modified: {format_date(st.st_mtime)}\n"
+                )
+            except Exception as e:
+                content_widget.update(f"[red]Cannot read file info: {e}[/red]")
 
     def on_file_list_view_directory_entered(
         self, event: FileListView.DirectoryEntered
     ):
         self._load_dir(event.path)
 
+    # ------------------------------------------------------------------
+    #  Double-click → open floating window
+    # ------------------------------------------------------------------
     def on_file_double_clicked(self, event: FileDoubleClicked):
-        if is_text_file(event.path):
-            self._open_editor(event.path)
-        else:
-            self._open_preview(event.path)
+        self._open_floating_window(event.path)
+
+    def on_floating_window_open_path(self, event: FloatingWindow.OpenPath):
+        """Handle request from inside a floating window to open a new one."""
+        self._open_floating_window(event.path)
+
+    def _open_floating_window(self, path: Path):
+        """Create and mount a new draggable floating window."""
+        fw = FloatingWindow(path, self._settings)
+        self.mount(fw)
 
     # ------------------------------------------------------------------
     #  Address bar + command bar
     # ------------------------------------------------------------------
     def on_input_submitted(self, event: Input.Submitted):
         if event.input.id == "addressbar":
-            p = Path(event.value).expanduser().resolve()
+            val = event.value.strip()
+            
+            # Detect IP IPv4 format or ssh://
+            ip_pattern = r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::(\d+))?$"
+            match = re.match(ip_pattern, val)
+            
+            if match or val.startswith("ssh://"):
+                if val.startswith("ssh://"):
+                    try:
+                        self.notify("Connecting to SSH server...")
+                        p = UPath(val)
+                        self._load_dir(p)
+                    except Exception as e:
+                        self.notify(f"SSH Error: {e}", severity="error")
+                    return
+                
+                host = match.group(1)
+                port = match.group(2) or "22"
+                
+                def on_ssh_login(creds):
+                    if creds:
+                        user, pwd = creds
+                        ssh_url = f"ssh://{host}:{port}/"
+                        
+                        self._connect_ssh(host, port, user, pwd)
+                
+                self.push_screen(SSHLoginModal(host, port), on_ssh_login)
+                self.query_one("#file-list", FileListView).focus()
+
+    def _connect_ssh(self, host: str, port: int, user: str, pwd: str):
+        from upath import UPath
+        ssh_url = f"ssh://{host}:{port}/"
+        
+        self.push_screen(LoadingModal(f"Connecting to {host}..."))
+        
+        def do_connect():
+            try:
+                # Securely pass auth via kwargs instead of URL-encoding to handle symbols
+                remote_path = UPath(ssh_url, username=user, password=pwd)
+                # Force network check
+                list(remote_path.iterdir())
+                
+                def update_ui():
+                    try: self.pop_screen()
+                    except: pass
+                    rtree = self.query_one("#remote-tree", DirectoryTree)
+                    # Set the reactive path natively to preserve UPath kwargs (like password) in memory!
+                    rtree.path = remote_path
+                    
+                    # We intercept the root node safely since we just changed its path
+                    self.query_one("#remote-title").remove_class("hidden")
+                    rtree.remove_class("hidden")
+                    self._load_dir(remote_path)
+                    
+                    # Also hide saved list once connected? Or just leave it?
+                    # self.query_one("#saved-ssh-list").add_class("hidden")
+                
+                self.call_from_thread(update_ui)
+            except Exception as e:
+                def fail_ui():
+                    try: self.pop_screen()
+                    except: pass
+                    self.notify(f"SSH Connection Failed: {e}", severity="error")
+                self.call_from_thread(fail_ui)
+                
+        self.run_worker(do_connect, thread=True)
+
+    def on_list_view_selected(self, event: ListView.Selected):
+        if event.list_view.id == "saved-ssh-list":
+            conn_str = getattr(event.item, "conn_str", None)
+            if conn_str:
+                # Format: user:pass@host:port
+                try:
+                    # Very basic parse
+                    upart, hpart = conn_str.split("@")
+                    user, pwd = upart.split(":", 1)
+                    if ":" in hpart:
+                        host, port = hpart.split(":", 1)
+                        port = int(port)
+                    else:
+                        host = hpart
+                        port = 22
+                    self._connect_ssh(host, port, user, pwd)
+                except Exception as e:
+                    self.notify(f"Invalid saved connection format: {e}", severity="error")
+            return
+
+            # Normal local path
+            p = Path(val).expanduser().resolve()
             if p.is_dir():
                 self._load_dir(p)
             else:
@@ -252,7 +464,6 @@ class FileExplorer(App):
     def on_key(self, event: events.Key):
         """Double-space opens the command modal from anywhere."""
         if event.key == "space":
-            # Don't intercept if an Input widget has focus
             focused = self.focused
             if focused is not None and focused.__class__.__name__ == "Input":
                 return
@@ -289,7 +500,7 @@ class FileExplorer(App):
         arg   = parts[1] if len(parts) > 1 else ""
 
         simple = {
-            "q": self.action_quit,        "quit": self.action_quit,
+            "q": self.exit,               "quit": self.exit,
             "h": self._cmd_help,          "help": self._cmd_help,
             "r": self.action_reload,      "reload": self.action_reload,
             "i": self._cmd_info,          "info": self._cmd_info,
@@ -333,10 +544,10 @@ class FileExplorer(App):
     def _cmd_settings(self):
         def cb(changed: bool):
             if changed:
-                # Re-read show_hidden from settings and apply everywhere
                 self.show_hidden = bool(self._settings.get("show_hidden"))
                 self._apply_hidden_everywhere()
                 self._load_dir(self._cwd)
+                self._update_saved_ssh_list()
                 self.notify("Settings saved")
         self.push_screen(SettingsModal(self._settings), cb)
 
@@ -344,7 +555,7 @@ class FileExplorer(App):
         self._show_info_notify(self._selected or self._cwd)
 
     # ------------------------------------------------------------------
-    #  Hidden files toggle — THE key fix
+    #  Hidden files toggle
     # ------------------------------------------------------------------
     def action_toggle_hidden(self):
         self.show_hidden = not self.show_hidden
@@ -354,7 +565,6 @@ class FileExplorer(App):
         self.notify("Hidden files: " + ("visible" if self.show_hidden else "hidden"))
 
     def _apply_hidden_everywhere(self):
-        """Push show_hidden into the tree AND re-render the file list."""
         try:
             tree = self.query_one("#tree-view", FilteredDirectoryTree)
             tree.set_show_hidden(self.show_hidden)

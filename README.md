@@ -1,4 +1,4 @@
-# Ketut's File Explorer
+# xtermfiles
 
 A modern, Windows Explorer-style file manager that runs entirely in the terminal.
 Perfect for VPS and remote server environments.
@@ -19,13 +19,33 @@ python cli.py /var/www     # opens a specific directory
 ## File Structure
 
 ```
-explorer/
+xtermfiles/
 ├── cli.py        ← Main entry point — run this
 ├── helpers.py    ← Utilities, CSS theme, Settings, Clipboard
 ├── modals.py     ← All dialogs: Input, Confirm, Search, Editor, Preview, Settings, Help
-├── widgets.py    ← FileListView, FileRow, DetailStrip
+├── widgets.py    ← FileListView, FileRow, DetailStrip, FloatingWindow
 └── README.md
 ```
+
+## Mouse Behavior
+
+| Action | Result |
+|---|---|
+| **Single click** folder | Enter the folder (show contents in right panel) |
+| **Single click** file | Select — shows details in bottom strip |
+| **Double click** any item | Open a **floating window** (draggable, multi-instance) |
+| Click address bar | Type path, Enter to navigate |
+| Click left tree | Navigate folder |
+| Scroll | Scroll file list |
+
+### Floating Windows
+
+Double-clicking any file or folder opens a **draggable floating window**:
+- **Drag** the title bar to move the window
+- **Click ✕** to close it
+- Multiple windows can be open simultaneously
+- Clicking an item inside a floating window opens yet another window
+- Works like a mini multi-window desktop inside the terminal
 
 ## Commands (prefix with colon)
 
@@ -66,14 +86,6 @@ explorer/
 | Ctrl+O | Open shell |
 | Esc | Clear clipboard |
 
-## Mouse Support
-
-- **Single click** → select item
-- **Double click** → enter folder / open file in editor
-- **Click address bar** → type path, Enter to navigate
-- **Click left tree** → navigate folder
-- **Scroll** → scroll file list
-
 ## Settings (`:settings`)
 
 | Setting | Default | Description |
@@ -86,20 +98,7 @@ explorer/
 | `start_path` | `~` | Startup directory |
 | `date_format` | `%d/%m/%Y %H:%M` | Date display format |
 
-Settings are saved to `~/.config/ketut-explorer/settings.json`.
-
-## Image Files
-
-The terminal cannot render actual images (pixels). When you open an image file,
-the explorer shows:
-- File info (name, format, MIME type, size, modified date)
-- Pixel dimensions (if `identify` from ImageMagick is installed)
-- Commands to view externally: `xdg-open`, `catimg`, `viu`, `chafa`
-
-For pixel-level image rendering in terminal, install one of:
-- [`viu`](https://github.com/atanunq/viu) — `cargo install viu`
-- [`chafa`](https://hpjansson.org/chafa/) — `apt install chafa`
-- [`catimg`](https://github.com/posva/catimg) — `brew install catimg`
+Settings are saved to `~/.config/xtermfiles/settings.json`.
 
 ## Requirements
 

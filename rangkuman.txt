@@ -1,0 +1,250 @@
+================================================================================
+                    RANGKUMAN PROYEK: Ketut's File Explorer
+================================================================================
+
+Proyek ini adalah file manager bergaya Windows Explorer yang berjalan
+sepenuhnya di terminal. Cocok digunakan untuk lingkungan VPS dan remote server.
+
+Dibangun menggunakan framework Textual + Rich (Python).
+
+Dependensi: textual>=0.47.0, rich>=13.0.0
+Install   : pip install textual rich
+Jalankan  : python cli.py [path opsional]
+
+
+================================================================================
+  STRUKTUR FILE
+================================================================================
+
+  cli.py      → Entry point utama (626 baris)
+  helpers.py  → Utilitas, CSS theme, Settings, Clipboard (498 baris)
+  modals.py   → Semua dialog modal (636 baris)
+  widgets.py  → Widget kustom: FileRow, FileListView, DetailStrip (221 baris)
+  README.md   → Dokumentasi proyek (109 baris)
+
+
+================================================================================
+  1. cli.py — Entry Point & Aplikasi Utama
+================================================================================
+
+File ini berisi:
+
+• Class FilteredDirectoryTree (turunan dari DirectoryTree)
+  - Meng-override filter_paths() untuk menyembunyikan file dotfiles (.xxx)
+  - Memiliki method set_show_hidden() untuk toggle tampil/sembunyi
+
+• Class FileExplorer (turunan dari App) — aplikasi utama:
+
+  [Inisialisasi]
+  - Memuat settings dan clipboard
+  - Menentukan direktori awal dari argumen CLI atau settings
+  - Reactive property: show_hidden
+
+  [Layout / Tampilan]
+  - Header dengan jam
+  - Toolbar berisi address bar (input path)
+  - Panel kiri: DirectoryTree (pohon folder)
+  - Panel kanan: daftar file (FileListView) + kolom header (Name, Size, Type, Date)
+  - Detail strip di bawah daftar file
+  - Status bar di paling bawah
+
+  [Keyboard Bindings]
+  - F5: Reload          - Ctrl+H: Toggle hidden
+  - Ctrl+F: Search      - Ctrl+N: New file
+  - Ctrl+Shift+N: New folder  - F2: Rename
+  - Delete: Hapus       - Ctrl+C/X/V: Copy/Cut/Paste
+  - Ctrl+E: Edit        - Ctrl+P: Preview
+  - Ctrl+O: Shell       - Escape: Clear clipboard
+  - Tab: Focus next     - Space×2: Buka command bar
+
+  [Fitur Utama]
+  - _load_dir(): Memuat isi direktori ke panel kanan
+  - _handle_command(): Parser perintah yang dimulai dengan ":"
+  - Operasi file: create, rename, delete, copy, cut, paste, chmod
+  - Editor teks bawaan (via TextEditorModal)
+  - Preview file (via FilePreviewModal)
+  - Pencarian rekursif (via SearchModal)
+  - Buka shell di direktori aktif
+  - Info file (nama, tipe, ukuran, tanggal, permissions, owner, MD5)
+
+  [Perintah (:command)]
+  :q/:quit, :h/:help, :r/:reload, :i/:info, :settings, :hidden,
+  :new <nama>, :mkdir <nama>, :rename <nama>, :del, :chmod <octal>,
+  :search <query>, :copy, :cut, :paste, :edit, :preview, :shell, :cd <path>
+
+
+================================================================================
+  2. helpers.py — Utilitas, CSS, Settings, Clipboard
+================================================================================
+
+File ini berisi:
+
+• Class Settings
+  - Menyimpan & memuat konfigurasi dari ~/.config/ketut-explorer/settings.json
+  - Default settings: show_hidden, preview_max_kb, date_format, start_path,
+    confirm_delete, confirm_overwrite, show_file_icons
+  - Methods: load(), save(), get(), set(), toggle(), all()
+
+• APP_CSS (string CSS ~300 baris)
+  - Tema gelap (dark mode) bergaya VS Code
+  - Styling untuk: Screen, Header, Footer, Toolbar, Address bar, Layout,
+    Panel kiri (tree), Panel kanan (file list), Detail strip, Status bar,
+    Modal dialogs, Editor, Settings modal, Help modal, Search modal,
+    Preview modal, Command modal
+
+• Konstanta Tipe File
+  - IMAGE_EXTS: .png, .jpg, .gif, .webp, .svg, dll.
+  - VIDEO_EXTS: .mp4, .mkv, .avi, .mov, dll.
+  - AUDIO_EXTS: .mp3, .wav, .ogg, .flac, dll.
+  - ARCHIVE_EXTS: .zip, .tar, .gz, .rar, .7z, dll.
+  - TEXT_EXTS: .py, .js, .html, .css, .json, .md, .txt, dll.
+  - TEXT_NAMES: makefile, dockerfile, .bashrc, .gitconfig, dll.
+  - LANG_MAP: Pemetaan ekstensi ke nama bahasa untuk syntax highlighting
+
+• Fungsi Utility
+  - is_image(), is_video(), is_audio(), is_archive(), is_text_file()
+  - get_lang(): Menentukan bahasa untuk syntax highlighting
+  - get_mime(): Mendapatkan MIME type file
+  - format_size(): Konversi ukuran byte ke format manusia (KB, MB, GB, dll.)
+  - format_perms(): Konversi mode file ke string permission (rwxrwxrwx)
+  - format_date(): Format timestamp ke string tanggal
+  - get_owner(), get_group(): Ambil nama pemilik/grup file
+  - md5_file(): Hitung hash MD5 sebuah file
+  - file_type_label(): Label deskriptif tipe file (misal "Python File")
+  - get_icon(): Ikon teks 2 karakter per tipe file (misal "py", "js")
+  - list_dir(): Daftar isi direktori, diurutkan (folder dulu, lalu file)
+
+• Class Clipboard
+  - Menyimpan path dan operasi (copy/cut)
+  - Methods: copy(), cut(), clear()
+  - Properties: has_item, label
+
+
+================================================================================
+  3. modals.py — Semua Dialog Modal
+================================================================================
+
+File ini berisi 8 class modal:
+
+• InputModal
+  - Dialog input teks generik (untuk new file, rename, dll.)
+  - Mendukung placeholder, default value, tombol danger
+  - Submit via Enter atau tombol OK, cancel via Esc
+
+• ConfirmModal
+  - Dialog konfirmasi Ya/Tidak (untuk delete, overwrite)
+  - Mendukung mode danger (tombol merah)
+
+• SearchModal
+  - Dialog pencarian file secara rekursif
+  - Pencarian real-time saat mengetik (min. 2 karakter)
+  - Menampilkan hingga 150 hasil dalam ListView
+  - Klik atau Enter untuk membuka hasil
+
+• ChmodModal
+  - Dialog untuk mengubah permission file
+  - Menampilkan permission saat ini dalam format simbolik dan oktal
+  - Input berupa string oktal (misal 755, 644)
+
+• TextEditorModal
+  - Editor teks full-screen dengan syntax highlighting
+  - Mendukung bahasa: Python, JavaScript, TypeScript, HTML, CSS, JSON, dll.
+  - Ctrl+S untuk save, Esc untuk cancel
+  - Footer dengan tombol Save dan Cancel
+
+• FilePreviewModal
+  - Preview file full-screen untuk semua tipe file:
+    * File teks/kode: Syntax highlighting dengan Rich Syntax
+    * File gambar: Info file + dimensi pixel (via ImageMagick identify)
+    * File arsip: Daftar isi (via unzip/tar/7z)
+    * File audio/video: Info dasar + pesan tidak bisa diputar di terminal
+    * File biner lainnya: Hex dump 512 byte pertama
+
+• SettingsModal
+  - Panel pengaturan dengan toggle ON/OFF dan input teks
+  - Boolean settings: show_hidden, show_file_icons, confirm_delete, confirm_overwrite
+  - Text settings: preview_max_kb, start_path, date_format
+  - Tombol Save untuk menyimpan ke file JSON
+
+• CommandModal
+  - Palette perintah (muncul saat double-space)
+  - Input field untuk mengetik perintah
+  - Baris hint menampilkan perintah yang sering dipakai
+  - Enter untuk execute, Esc atau Space kosong untuk close
+
+• HelpModal
+  - Referensi lengkap semua perintah, shortcut, dan mouse actions
+  - Diformat dengan warna menggunakan Rich markup
+
+• Data tambahan:
+  - COMMANDS: list 18 perintah dengan deskripsi
+  - SHORTCUTS: list 15 keyboard shortcut dengan deskripsi
+
+
+================================================================================
+  4. widgets.py — Widget Kustom
+================================================================================
+
+File ini berisi 4 class:
+
+• FileDoubleClicked (Message)
+  - Pesan internal saat user double-click file (bukan folder)
+
+• FileRow (turunan ListItem)
+  - Satu baris dalam daftar file
+  - Menampilkan 4 kolom: Name (dengan ikon), Size, Type, Date
+  - Styling berbeda untuk folder (biru), symlink (ungu), dotfile (abu-abu)
+  - Deteksi double-click (chain == 2) untuk membuka file/folder
+
+• FileListView (turunan ListView)
+  - Panel kanan yang menampilkan daftar file bergaya Windows Explorer
+  - Messages: FileSelected, DirectoryEntered
+  - Methods:
+    * load_directory(): Muat file dari path, urutkan folder→file
+    * refresh_directory(): Reload direktori saat ini
+    * try_select_path(): Highlight baris tertentu
+  - Navigasi keyboard: Enter = masuk folder, Backspace = naik ke parent
+
+• DetailStrip (turunan Static)
+  - Bar info 2 baris di bawah daftar file
+  - show_path(): Tampilkan metadata file (ikon, nama, tipe, ukuran, tanggal,
+    permissions, owner, MIME type)
+  - show_dir_summary(): Tampilkan ringkasan folder (jumlah folder & file)
+
+
+================================================================================
+  5. README.md — Dokumentasi
+================================================================================
+
+Berisi:
+- Instruksi instalasi dan cara menjalankan
+- Struktur file proyek
+- Daftar perintah (18 perintah dimulai dengan ":")
+- Daftar keyboard shortcut (15 shortcut)
+- Dukungan mouse (klik, double-klik, scroll)
+- Penjelasan settings (7 opsi pengaturan)
+- Info tentang penanganan file gambar di terminal
+- Daftar requirement (textual, rich)
+
+
+================================================================================
+  KESIMPULAN
+================================================================================
+
+Proyek "Ketut's File Explorer" adalah aplikasi TUI (Text User Interface) 
+file manager yang lengkap dan modern, dibangun dengan Python menggunakan 
+framework Textual dan Rich. Aplikasi ini menyediakan:
+
+1. Antarmuka dua panel: pohon folder (kiri) dan daftar file detail (kanan)
+2. Operasi file lengkap: buat, hapus, rename, copy, cut, paste, chmod
+3. Editor teks bawaan dengan syntax highlighting
+4. Preview file multi-format (teks, gambar, arsip, biner)
+5. Pencarian file rekursif real-time
+6. Sistem pengaturan yang persistent (disimpan ke JSON)
+7. Clipboard internal
+8. Command bar (palette perintah) via double-space
+9. Tema gelap bergaya VS Code
+10. Dukungan keyboard shortcut dan mouse penuh
+
+Total kode: ~1.981 baris Python + 109 baris dokumentasi.
+================================================================================

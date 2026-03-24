@@ -1,11 +1,13 @@
 """
 modals.py — All modal dialogs: Input, Confirm, Search, Chmod, Editor, Settings, Help, Preview
+xtermfiles — Terminal File Explorer
 """
 
 import subprocess
 from pathlib import Path
 from typing import Optional
 
+from textual import events
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, ListView, ListItem, Static, TextArea
@@ -444,7 +446,7 @@ class SettingsModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="settings-box"):
-            yield Label("  Settings — Ketut's File Explorer", id="settings-titlebar")
+            yield Label("  Settings — xtermfiles", id="settings-titlebar")
 
             with ScrollableContainer(id="settings-scroll"):
 
@@ -479,6 +481,20 @@ class SettingsModal(ModalScreen[bool]):
                         classes="stg-input",
                     )
 
+                # ── SSH profiles ──────────────────────────────────────
+                yield Static("[bold #4fc1ff]Saved SSH Connections[/bold #4fc1ff]",
+                             classes="stg-section")
+                yield Static("[dim]Format: user:pass@host:port (one per line)[/dim]",
+                             classes="stg-label")
+                saved_str = "\n".join(self._s.get("saved_ssh") or [])
+                ta_ssh = TextArea(
+                    saved_str,
+                    id="inp-saved_ssh",
+                    classes="stg-input",
+                )
+                ta_ssh.styles.height = 10
+                yield ta_ssh
+
             # ── Footer ────────────────────────────────────────────────
             with Horizontal(id="settings-footer"):
                 yield Button("Cancel", id="btn-cancel", classes="btn-cancel")
@@ -502,6 +518,15 @@ class SettingsModal(ModalScreen[bool]):
                     self._s.set(key, int(raw) if key == "preview_max_kb" else raw)
                 except Exception:
                     pass
+            
+            # Save SSH profiles
+            try:
+                raw_ssh = self.query_one("#inp-saved_ssh", TextArea).text.strip()
+                ssh_list = [line.strip() for line in raw_ssh.split("\n") if line.strip()]
+                self._s.set("saved_ssh", ssh_list)
+            except Exception:
+                pass
+
             self.dismiss(True)
         else:
             self.dismiss(False)
@@ -595,7 +620,7 @@ SHORTCUTS = [
 class HelpModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="help-box"):
-            yield Label("  Ketut's File Explorer — Command Reference", id="help-titlebar")
+            yield Label("  xtermfiles — Command Reference", id="help-titlebar")
             with ScrollableContainer(id="help-scroll"):
                 yield Static(self._build(), id="help-content")
             with Horizontal(id="help-footer"):
@@ -626,11 +651,65 @@ class HelpModal(ModalScreen[None]):
         ]:
             out.append("  [bold #6a9955]{:<14}[/bold #6a9955]  [#d4d4d4]{}[/#d4d4d4]".format(label, desc))
         out.append("")
-        out.append("[dim]Settings saved to  ~/.config/ketut-explorer/settings.json[/dim]")
+        out.append("[dim]Settings saved to  ~/.config/xtermfiles/settings.json[/dim]")
         return "\n".join(out)
     def on_button_pressed(self, _e: Button.Pressed):
         self.dismiss(None)
 
     def on_key(self, e):
         if e.key == "escape":
+            self.dismiss(None)
+
+class SSHLoginModal(ModalScreen[tuple[str, str]]):
+    def __init__(self, host: str, port: str):
+        super().__init__()
+        self.host = host
+        self.port = port
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="ssh-box", classes="dialog-box"):
+            yield Label(f"SSH Login: {self.host}:{self.port}", id="ssh-title", classes="dialog-title")
+            with Horizontal(classes="dialog-input-row"):
+                yield Label("User:", classes="dialog-label")
+                yield Input("root", id="ssh-user", classes="dialog-input")
+            with Horizontal(classes="dialog-input-row"):
+                yield Label("Pass:", classes="dialog-label")
+                yield Input(password=True, id="ssh-pass", classes="dialog-input")
+            with Horizontal(classes="dialog-btn-row"):
+                yield Button("Connect", id="ssh-connect-btn", variant="primary")
+                yield Button("Cancel", id="ssh-cancel-btn")
+
+    def on_mount(self):
+        self.query_one("#ssh-pass", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "ssh-connect-btn":
+            user = self.query_one("#ssh-user", Input).value
+            pwd = self.query_one("#ssh-pass", Input).value
+            self.dismiss((user, pwd))
+        elif event.button.id == "ssh-cancel-btn":
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted):
+        user = self.query_one("#ssh-user", Input).value
+        pwd = self.query_one("#ssh-pass", Input).value
+        self.dismiss((user, pwd))
+
+    def on_key(self, event: events.Key):
+        if event.key == "escape":
+            self.dismiss(None)
+
+class LoadingModal(ModalScreen[None]):
+    def __init__(self, message: str):
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="loading-box", classes="dialog-box"):
+            yield Label(self.message, id="loading-msg", classes="dialog-title")
+            with Horizontal(classes="dialog-btn-row"):
+                yield Button("Cancel", id="loading-cancel-btn")
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "loading-cancel-btn":
             self.dismiss(None)

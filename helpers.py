@@ -1,5 +1,6 @@
 """
 helpers.py — Utility functions, CSS theming, Settings, Clipboard
+xtermfiles — Terminal File Explorer
 """
 
 import os
@@ -16,7 +17,7 @@ from pathlib import Path
 # ─────────────────────────────────────────────────────────────────────────────
 #  Settings — persisted to ~/.config/ketut-explorer/settings.json
 # ─────────────────────────────────────────────────────────────────────────────
-SETTINGS_PATH = Path.home() / ".config" / "ketut-explorer" / "settings.json"
+SETTINGS_PATH = Path.home() / ".config" / "xtermfiles" / "settings.json"
 
 DEFAULTS: dict = {
     "show_hidden":        False,   # show dotfiles in file list & tree
@@ -26,6 +27,7 @@ DEFAULTS: dict = {
     "confirm_delete":     True,    # ask before deleting
     "confirm_overwrite":  True,    # ask before paste-overwrite
     "show_file_icons":    True,    # emoji icons in file list
+    "saved_ssh":          [],      # list of strings: "user:pass@host:port"
 }
 
 SETTING_LABELS = {
@@ -36,6 +38,7 @@ SETTING_LABELS = {
     "confirm_delete":    ("Confirm before delete",         "bool"),
     "confirm_overwrite": ("Confirm before overwrite",      "bool"),
     "show_file_icons":   ("Show file icons",               "bool"),
+    "saved_ssh":         ("Saved SSH Connections",         "list"),
 }
 
 
@@ -84,7 +87,7 @@ class Settings:
 #  GLOBAL CSS
 # ─────────────────────────────────────────────────────────────────────────────
 APP_CSS = """
-Screen { background: #1e1e1e; color: #d4d4d4; }
+Screen { background: #1e1e1e; color: #d4d4d4; layers: base floating; }
 
 Header { background: #2d2d2d; color: #ffffff; text-style: bold; height: 1; }
 Footer { background: #007acc; color: #ffffff; height: 1; }
@@ -104,9 +107,15 @@ Footer { background: #007acc; color: #ffffff; height: 1; }
 #left-panel {
     width: 26%; min-width: 20; max-width: 48;
     background: #252526; border-right: solid #3e3e3e;
+    overflow-y: auto;
 }
-#left-title { height: 1; background: #37373d; color: #cccccc; padding: 0 1; text-style: bold; }
-#tree-view  { height: 1fr; background: #252526; scrollbar-color: #424242 #252526; scrollbar-size: 1 1; }
+.tree-title { height: 1; background: #37373d; color: #4fc1ff; padding: 0 1; text-style: bold; }
+.tree-view  { height: auto; min-height: 5; background: #252526; }
+.ssh-list   { height: auto; background: #1e1e1e; }
+.ssh-item   { padding: 0 1; color: #cccccc; }
+.ssh-item:hover { background: #2a2d2e; color: #ffffff; }
+.ssh-item.--highlight { background: #094771; color: #ffffff; }
+.hidden { display: none; }
 DirectoryTree .tree--cursor    { background: #094771; color: #ffffff; }
 DirectoryTree .tree--highlight { background: #2a2d2e; }
 DirectoryTree .tree--guides    { color: #404040; }
@@ -322,6 +331,128 @@ ModalScreen { background: rgba(0,0,0,0.6); align: center middle; }
     padding: 0 2;
     border-top: solid #3e3e3e;
 }
+
+/* ── Floating Windows ── */
+FloatingWindow {
+    layer: floating;
+    width: 64;
+    height: 22;
+    background: #1e1e1e;
+    border: tall #007acc;
+    overflow: hidden;
+}
+.fw-titlebar {
+    height: 1;
+    background: #007acc;
+    color: #ffffff;
+    layout: horizontal;
+}
+.fw-title-label {
+    width: 1fr;
+    padding: 0 1;
+    text-style: bold;
+    height: 1;
+}
+.fw-close-btn {
+    width: 5;
+    min-width: 5;
+    height: 1;
+    background: #c72e2e;
+    color: #ffffff;
+    border: none;
+    text-align: center;
+}
+.fw-close-btn:hover { background: #e33232; }
+.fw-list {
+    height: 1fr;
+    background: #1e1e1e;
+    scrollbar-color: #424242 #1e1e1e;
+    scrollbar-size: 1 1;
+}
+.fw-list > ListItem { padding: 0 1; height: 1; color: #d4d4d4; }
+.fw-list > ListItem:hover { background: #2a2d2e; }
+.fw-list > ListItem.--highlight { background: #094771; }
+.fw-content {
+    height: 1fr;
+    padding: 1 2;
+}
+.fw-preview {
+    color: #d4d4d4;
+}
+.fw-resize-handle {
+    dock: bottom;
+    width: 100%;
+    height: 1;
+    color: #555555;
+    text-align: right;
+    padding: 0 0;
+    background: #252526;
+}
+.fw-resize-handle:hover {
+    color: #007acc;
+}
+.fw-editor {
+    height: 1fr;
+    background: #1e1e1e;
+    border: none;
+}
+.fw-cmd-input {
+    display: none;
+    dock: bottom;
+    height: 1;
+    background: #2d2d2d;
+    color: #ffffff;
+    border: none;
+    padding: 0 1;
+}
+.fw-cmd-input:focus {
+    background: #1e3a5f;
+    border: none;
+}
+.fw-mode-label {
+    width: auto;
+    padding: 0 1;
+    height: 1;
+    color: #ffffff;
+}
+
+/* ── Right panel file preview ── */
+#file-preview-panel {
+    display: none;
+    height: 1fr;
+    padding: 0;
+    background: #1e1e1e;
+    overflow-y: auto;
+}
+#file-preview-content {
+    padding: 1 2;
+    color: #d4d4d4;
+}
+
+/* ── SSH Login Modal ── */
+#ssh-box {
+    width: 50;
+    height: 16;
+}
+#ssh-title {
+    width: 1fr;
+    text-align: center;
+    padding: 1;
+    background: #1e3a5f;
+    color: #ffffff;
+    text-style: bold;
+}
+
+/* ── Loading Modal ── */
+#loading-box {
+    width: 40;
+    height: 10;
+    align: center middle;
+}
+#loading-msg {
+    margin-bottom: 2;
+    text-align: center;
+}
 """
 
 
@@ -381,18 +512,21 @@ def format_size(size: int) -> str:
         size /= 1024.0
     return f"{size:.1f} PB"
 
-def format_perms(mode: int) -> str: return stat.filemode(mode)
+def format_perms(mode: int) -> str:
+    try: return stat.filemode(mode)
+    except: return "----------"
 
 def format_date(ts: float, fmt: str = "%d/%m/%Y %H:%M") -> str:
-    return datetime.fromtimestamp(ts).strftime(fmt)
+    try: return datetime.fromtimestamp(ts).strftime(fmt)
+    except: return str(ts)
 
 def get_owner(st: os.stat_result) -> str:
     try:    return pwd.getpwuid(st.st_uid).pw_name
-    except: return str(st.st_uid)
+    except: return str(getattr(st, "st_uid", "ssh-user"))
 
 def get_group(st: os.stat_result) -> str:
     try:    return grp.getgrgid(st.st_gid).gr_name
-    except: return str(st.st_gid)
+    except: return str(getattr(st, "st_gid", "ssh-group"))
 
 def md5_file(path: Path) -> str:
     h = hashlib.md5()
@@ -495,4 +629,4 @@ class Clipboard:
     @property
     def label(self) -> str:
         if not self.has_item: return ""
-        return (" " if self.op == "copy" else "️ ") + self.path.name
+        return ("📋 " if self.op == "copy" else "✂️ ") + self.path.name
